@@ -2358,6 +2358,7 @@ private:
 
                                 if (pos_min > pos_min_thold) {
                                     SLT_WRN(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d, n_swa = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min, n_swa);
+                                    SLT_INF(slot, "checkpoint search: candidates = %zu, pos_min_thold = %d\n", slot.prompt.checkpoints.size(), pos_min_thold);
 
                                     // search for a context checkpoint
                                     const auto it = std::find_if(
@@ -2365,15 +2366,17 @@ private:
                                         slot.prompt.checkpoints.rend(),
                                         [&, func_name = __func__](const auto & cur) {
                                             // guarantee that a checkpoint will result in at least one token being processed [TAG_PROMPT_LOGITS]
-                                            LOG_INF("slot %12.*s: id %2d | task %d | Checking checkpoint with [%d, %d] against %d...\n", 12,
-                                                func_name, (slot).id, ((slot).task ? (slot).task->id : -1), cur.pos_min, cur.pos_max, pos_min_thold);
-                                            return cur.pos_min < pos_min_thold;
+                                            const bool usable = cur.pos_min < pos_min_thold;
+                                            LOG_INF("slot %12.*s: id %2d | task %d | checkpoint candidate [%d, %d], n_tokens = %" PRId64 ", pos_min_thold = %d, usable = %d\n", 12,
+                                                func_name, (slot).id, ((slot).task ? (slot).task->id : -1), cur.pos_min, cur.pos_max, cur.n_tokens, pos_min_thold, usable ? 1 : 0);
+                                            return usable;
                                         }
                                     );
 
                                     bool do_reset = it == slot.prompt.checkpoints.rend();
 
                                     if (!do_reset) {
+                                        SLT_INF(slot, "checkpoint selected: pos_min = %d, pos_max = %d, n_tokens = %" PRId64 "\n", it->pos_min, it->pos_max, it->n_tokens);
                                         // restore the context checkpoint
                                         const size_t checkpoint_size = it->data.size();
                                         const size_t n = llama_state_seq_set_data_ext(ctx, it->data.data(), checkpoint_size, slot.id, LLAMA_STATE_SEQ_FLAGS_PARTIAL_ONLY);
@@ -2390,6 +2393,7 @@ private:
                                     }
 
                                     if (do_reset) {
+                                        SLT_WRN(slot, "checkpoint search result: no usable checkpoint for pos_min_thold = %d\n", pos_min_thold);
                                         SLT_WRN(slot, "forcing full prompt re-processing due to lack of cache data (likely due to SWA or hybrid/recurrent memory, see %s)\n",
                                                 "https://github.com/ggml-org/llama.cpp/pull/13194#issuecomment-2868343055");
                                         pos_next = 0;
