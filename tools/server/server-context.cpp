@@ -2244,6 +2244,16 @@ private:
                                     SLT_WRN(slot, "cache reuse is not supported - ignoring n_cache_reuse = %d\n", n_cache_reuse);
                                 }
 
+                                SLT_INF(slot,
+                                        "prompt reuse prefix: cached_tokens = %d, incoming_tokens = %d, common_prefix = %d, divergence_pos = %d, cache_prompt = %d, can_shift = %d, has_mtmd = %d\n",
+                                        slot.prompt.n_tokens(),
+                                        slot.task->n_tokens(),
+                                        n_past,
+                                        n_past,
+                                        slot.task->params.cache_prompt ? 1 : 0,
+                                        can_cache_reuse ? 1 : 0,
+                                        slot.prompt.tokens.has_mtmd ? 1 : 0);
+
                                 // reuse chunks from the cached prompt by shifting their KV cache in the new position
                                 if (can_cache_reuse && n_cache_reuse > 0) {
                                     GGML_ASSERT(!slot.prompt.tokens.has_mtmd);
@@ -2306,6 +2316,15 @@ private:
                             // the largest pos_min required for a checkpoint to be useful
                             const auto pos_min_thold = std::max(0, pos_next - n_swa);
 
+                            SLT_INF(slot,
+                                    "prompt reuse boundary: n_past = %d, cached_tokens = %d, incoming_tokens = %d, pos_next = %d, n_swa = %d, pos_min_thold = %d\n",
+                                    n_past,
+                                    slot.prompt.n_tokens(),
+                                    slot.task->n_tokens(),
+                                    pos_next,
+                                    n_swa,
+                                    pos_min_thold);
+
                             if (n_past > 0 && n_past < slot.prompt.n_tokens()) {
                                 const auto pos_min = llama_memory_seq_pos_min(llama_get_memory(ctx), slot.id);
                                 if (pos_min == -1) {
@@ -2357,6 +2376,12 @@ private:
                                 }
 
                                 if (pos_min > pos_min_thold) {
+                                    SLT_WRN(slot,
+                                            "prompt reuse leaves fast path: common_prefix = %d, divergence_pos = %d, pos_min = %d, pos_min_thold = %d\n",
+                                            n_past,
+                                            n_past,
+                                            pos_min,
+                                            pos_min_thold);
                                     SLT_WRN(slot, "n_past = %d, slot.prompt.tokens.size() = %d, seq_id = %d, pos_min = %d, n_swa = %d\n", n_past, (int) slot.prompt.tokens.size(), slot.id, pos_min, n_swa);
 
                                     // search for a context checkpoint
