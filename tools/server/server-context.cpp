@@ -2400,10 +2400,12 @@ private:
 
                             {
                                 // erase any checkpoints with pos_min > pos_min_thold
+                                SLT_INF(slot, "checkpoint invalidation: candidates = %zu, pos_min_thold = %d\n", slot.prompt.checkpoints.size(), pos_min_thold);
                                 for (auto it = slot.prompt.checkpoints.begin(); it != slot.prompt.checkpoints.end();) {
                                     const auto & cur = *it;
                                     if (cur.pos_min > pos_min_thold) {
-                                        SLT_WRN(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", n_swa = %d, size = %.3f MiB)\n", cur.pos_min, cur.pos_max, cur.n_tokens, n_swa, (float) cur.data.size() / 1024 / 1024);
+                                        SLT_WRN(slot, "erased invalidated context checkpoint (pos_min = %d, pos_max = %d, n_tokens = %" PRId64 ", pos_min_thold = %d, delta = %d, n_swa = %d, size = %.3f MiB)\n",
+                                                cur.pos_min, cur.pos_max, cur.n_tokens, pos_min_thold, cur.pos_min - pos_min_thold, n_swa, (float) cur.data.size() / 1024 / 1024);
                                         it = slot.prompt.checkpoints.erase(it);
                                     } else {
                                         ++it;
