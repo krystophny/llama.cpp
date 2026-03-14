@@ -962,6 +962,18 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp() {
         });
     }
 
+    // Build output_text convenience field (concatenation of all output_text parts)
+    std::string output_text;
+    for (const auto & item : output) {
+        if (json_value(item, "type", std::string()) == "message") {
+            for (const auto & part : item.at("content")) {
+                if (json_value(part, "type", std::string()) == "output_text") {
+                    output_text += part.at("text").get<std::string>();
+                }
+            }
+        }
+    }
+
     std::time_t t = std::time(0);
     json res = {
         {"completed_at", t},
@@ -970,6 +982,7 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp() {
         {"model",        oaicompat_model},
         {"object",       "response"},
         {"output",       output},
+        {"output_text",  output_text},
         {"status",       "completed"},
         {"usage",        json {
             {"input_tokens",  n_prompt_tokens},
@@ -1068,19 +1081,32 @@ json server_task_result_cmpl_final::to_json_oaicompat_resp_stream() {
         output.push_back(output_item);
     }
 
+    // Build output_text convenience field for streaming final event
+    std::string output_text_stream;
+    for (const auto & item : output) {
+        if (json_value(item, "type", std::string()) == "message") {
+            for (const auto & part : item.at("content")) {
+                if (json_value(part, "type", std::string()) == "output_text") {
+                    output_text_stream += part.at("text").get<std::string>();
+                }
+            }
+        }
+    }
+
     std::time_t t = std::time(0);
     server_sent_events.push_back(json {
         {"event", "response.completed"},
         {"data", json {
             {"type", "response.completed"},
             {"response", json {
-                {"id",         oai_resp_id},
-                {"object",     "response"},
-                {"created_at", t},
-                {"status",     "completed"},
-                {"model",      oaicompat_model},
-                {"output",     output},
-                {"usage",      json {
+                {"id",          oai_resp_id},
+                {"object",      "response"},
+                {"created_at",  t},
+                {"status",      "completed"},
+                {"model",       oaicompat_model},
+                {"output",      output},
+                {"output_text", output_text_stream},
+                {"usage",       json {
                     {"input_tokens",  n_prompt_tokens},
                     {"output_tokens", n_decoded},
                     {"total_tokens",  n_decoded + n_prompt_tokens}
