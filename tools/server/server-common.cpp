@@ -1280,12 +1280,8 @@ json convert_responses_to_chatcmpl(const json & response_body) {
             } else if (exists_and_is_array(item, "content") &&
                 exists_and_is_string(item, "role") &&
                 item.at("role") == "assistant" &&
-                // exists_and_is_string(item, "status") &&
-                // (item.at("status") == "in_progress" ||
-                //     item.at("status") == "completed" ||
-                //     item.at("status") == "incomplete") &&
-                // item["status"] not sent by codex-cli
-                // item["type"] == "message" for OutputMessage, absent for EasyInputMessage
+                // status not checked (not always present, e.g. codex-cli omits it)
+                // type == "message" for OutputMessage, absent for EasyInputMessage
                 (!item.contains("type") || item.at("type") == "message")
             ) {
                 // #responses_create-input-input_item_list-item-output_message
