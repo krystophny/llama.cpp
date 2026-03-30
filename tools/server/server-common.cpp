@@ -1255,6 +1255,25 @@ json convert_responses_to_chatcmpl(const json & response_body) {
                 if (item.contains("status")) {
                     item.erase("status");
                 }
+                // Merge system/developer messages into the first system message.
+                // Many model templates (e.g. Qwen) require all system content at
+                // position 0 and reject system messages elsewhere in the conversation.
+                if (item.at("role") == "system" || item.at("role") == "developer") {
+                    if (!chatcmpl_messages.empty() && chatcmpl_messages[0].value("role", "") == "system") {
+                        auto & first_msg = chatcmpl_messages[0];
+                        // Convert string content to array format if needed
+                        if (first_msg["content"].is_string()) {
+                            std::string old_text = first_msg["content"].get<std::string>();
+                            first_msg["content"] = json::array({json{{"text", old_text}, {"type", "text"}}});
+                        }
+                        auto & first_content = first_msg["content"];
+                        for (const auto & part : chatcmpl_content) {
+                            first_content.push_back(part);
+                        }
+                        continue; // merged, don't push a separate message
+                    }
+                    item["role"] = "system";
+                }
                 item["content"] = chatcmpl_content;
 
                 chatcmpl_messages.push_back(item);
@@ -1266,35 +1285,25 @@ json convert_responses_to_chatcmpl(const json & response_body) {
                 //     item.at("status") == "completed" ||
                 //     item.at("status") == "incomplete") &&
                 // item["status"] not sent by codex-cli
-                exists_and_is_string(item, "type") &&
-                item.at("type") == "message"
+                // item["type"] == "message" for OutputMessage, absent for EasyInputMessage
+                (!item.contains("type") || item.at("type") == "message")
             ) {
                 // #responses_create-input-input_item_list-item-output_message
-                auto chatcmpl_content = json::array();
+                // Also handles AssistantMessageItemParam / EasyInputMessage with role "assistant"
+                std::vector<json> chatcmpl_content;
 
                 for (const auto & output_text : item.at("content")) {
                     const std::string type = json_value(output_text, "type", std::string());
-                    if (type == "output_text") {
-                        if (!exists_and_is_string(output_text, "text")) {
-                            throw std::invalid_argument("'Output text' requires 'text'");
-                            // Ignore annotations and logprobs for now
-                            chatcmpl_content.push_back({
-                                {"text", output_text.at("text")},
-                                {"type", "text"},
-                            });
-                        }
-                    } else if (type == "refusal") {
-                        if (!exists_and_is_string(output_text, "refusal")) {
-                            throw std::invalid_argument("'Refusal' requires 'refusal'");
-                            // Ignore annotations and logprobs for now
-                            chatcmpl_content.push_back({
-                                {"refusal", output_text.at("refusal")},
-                                {"type", "refusal"},
-                            });
-                        }
-                    } else {
-                        throw std::invalid_argument("'type' must be one of 'output_text' or 'refusal'");
+                    if (type != "output_text" && type != "input_text") {
+                        throw std::invalid_argument("'type' must be 'output_text' or 'input_text'");
                     }
+                    if (!exists_and_is_string(output_text, "text")) {
+                        throw std::invalid_argument("'Output text' requires 'text'");
+                    }
+                    chatcmpl_content.push_back({
+                        {"text", output_text.at("text")},
+                        {"type", "text"},
+                    });
                 }
 
                 if (merge_prev) {
@@ -1303,7 +1312,9 @@ json convert_responses_to_chatcmpl(const json & response_body) {
                         prev_msg["content"] = json::array();
                     }
                     auto & prev_content = prev_msg["content"];
-                    prev_content.insert(prev_content.end(), chatcmpl_content.begin(), chatcmpl_content.end());
+                    for (const auto & part : chatcmpl_content) {
+                        prev_content.push_back(part);
+                    }
                 } else {
                     item.erase("status");
                     item.erase("type");
@@ -1407,11 +1418,17 @@ json convert_responses_to_chatcmpl(const json & response_body) {
         }
         std::vector<json> chatcmpl_tools;
         for (json resp_tool : response_body.at("tools")) {
-            json chatcmpl_tool;
+            const std::string tool_type = json_value(resp_tool, "type", std::string());
 
-            if (json_value(resp_tool, "type", std::string()) != "function") {
-                throw std::invalid_argument("'type' of tool must be 'function'");
+            // Skip non-function tools (e.g. web_search, code_interpreter)
+            // sent by clients like Codex CLI — these are provider-specific
+            // and cannot be converted to chat completions function tools
+            if (tool_type != "function") {
+                SRV_WRN("skipping unsupported tool type '%s' in Responses conversion\n", tool_type.c_str());
+                continue;
             }
+
+            json chatcmpl_tool;
             resp_tool.erase("type");
             chatcmpl_tool["type"] = "function";
 
@@ -1422,12 +1439,23 @@ json convert_responses_to_chatcmpl(const json & response_body) {
             chatcmpl_tools.push_back(chatcmpl_tool);
         }
         chatcmpl_body.erase("tools");
-        chatcmpl_body["tools"] = chatcmpl_tools;
+        if (!chatcmpl_tools.empty()) {
+            chatcmpl_body["tools"] = chatcmpl_tools;
+        }
     }
 
     if (response_body.contains("max_output_tokens")) {
         chatcmpl_body.erase("max_output_tokens");
         chatcmpl_body["max_tokens"] = response_body["max_output_tokens"];
+    }
+
+    // Strip Responses-only keys that have no chat completions equivalent
+    // (e.g. Codex CLI sends store, include, prompt_cache_key, web_search)
+    for (const char * key : {
+        "store", "include", "prompt_cache_key", "web_search",
+        "text", "truncation", "metadata",
+    }) {
+        chatcmpl_body.erase(key);
     }
 
     return chatcmpl_body;
