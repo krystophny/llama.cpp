@@ -103,6 +103,8 @@ class ServerProcess:
     media_path: str | None = None
     sleep_idle_seconds: int | None = None
     webui_mcp_proxy: bool = False
+    http_trace_dir: str | None = None
+    http_trace_max_bytes: int | None = None
 
     # session variables
     process: subprocess.Popen | None = None
@@ -237,6 +239,10 @@ class ServerProcess:
             server_args.extend(["--media-path", self.media_path])
         if self.sleep_idle_seconds is not None:
             server_args.extend(["--sleep-idle-seconds", self.sleep_idle_seconds])
+        if self.http_trace_dir:
+            server_args.extend(["--http-trace-dir", self.http_trace_dir])
+        if self.http_trace_max_bytes is not None:
+            server_args.extend(["--http-trace-max-bytes", self.http_trace_max_bytes])
         if self.webui_mcp_proxy:
             server_args.append("--webui-mcp-proxy")
 

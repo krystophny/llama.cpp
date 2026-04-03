@@ -1,12 +1,15 @@
 #pragma once
 
 #include <atomic>
+#include <chrono>
 #include <functional>
 #include <map>
+#include <memory>
 #include <string>
 #include <thread>
 
 struct common_params;
+class server_http_trace;
 
 // generator-like API for HTTP response generation
 // this object response with one of the 2 modes:
@@ -36,10 +39,14 @@ using server_http_res_ptr = std::unique_ptr<server_http_res>;
 struct server_http_req {
     std::map<std::string, std::string> params; // path_params + query_params
     std::map<std::string, std::string> headers; // used by MCP proxy
+    std::string method;
     std::string path;
     std::string query_string; // query parameters string (e.g. "action=save")
     std::string body;
     const std::function<bool()> & should_stop;
+    std::shared_ptr<server_http_trace> trace;
+    std::string trace_request_id;
+    std::chrono::steady_clock::time_point trace_started_at;
 
     std::string get_param(const std::string & key, const std::string & def = "") const {
         auto it = params.find(key);

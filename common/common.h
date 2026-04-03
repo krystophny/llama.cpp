@@ -614,6 +614,9 @@ struct common_params {
     bool endpoint_props   = false; // only control POST requests, not GET
     bool endpoint_metrics = false;
 
+    std::string http_trace_dir;
+    int32_t http_trace_max_bytes = 16384;
+
     // enable built-in tools
     std::vector<std::string> server_tools;
 

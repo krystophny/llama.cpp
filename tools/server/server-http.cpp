@@ -1,9 +1,11 @@
 #include "common.h"
 #include "server-http.h"
 #include "server-common.h"
+#include "server-trace.h"
 
 #include <cpp-httplib/httplib.h>
 
+#include <chrono>
 #include <functional>
 #include <string>
 #include <thread>
@@ -23,6 +25,7 @@
 class server_http_context::Impl {
 public:
     std::unique_ptr<httplib::Server> srv;
+    std::shared_ptr<server_http_trace> trace;
 };
 
 server_http_context::server_http_context()
@@ -57,6 +60,7 @@ bool server_http_context::init(const common_params & params) {
     hostname = params.hostname;
 
     auto & srv = pimpl->srv;
+    pimpl->trace = server_http_trace_create(params);
 
 #ifdef CPPHTTPLIB_OPENSSL_SUPPORT
     if (params.ssl_file_key != "" && params.ssl_file_cert != "") {
@@ -393,11 +397,20 @@ static void process_handler_response(server_http_req_ptr && request, server_http
         // convert to shared_ptr as both chunked_content_provider() and on_complete() need to use it
         std::shared_ptr<server_http_req> q_ptr = std::move(request);
         std::shared_ptr<server_http_res> r_ptr = std::move(response);
-        const auto chunked_content_provider = [response = r_ptr](size_t, httplib::DataSink & sink) -> bool {
+        struct stream_trace_state {
+            uint64_t sequence = 0;
+            std::string full_body;
+        };
+        std::shared_ptr<stream_trace_state> trace_state = std::make_shared<stream_trace_state>();
+        const auto chunked_content_provider = [response = r_ptr, request = q_ptr, trace_state](size_t, httplib::DataSink & sink) -> bool {
             std::string chunk;
             bool has_next = response->next(chunk);
             if (!chunk.empty()) {
-                // TODO: maybe handle sink.write unsuccessful? for now, we rely on is_connection_closed()
+                if (request->trace && !request->trace_request_id.empty()) {
+                    trace_state->sequence++;
+                    trace_state->full_body += chunk;
+                    request->trace->log_stream_event(request->trace_request_id, trace_state->sequence, chunk);
+                }
                 sink.write(chunk.data(), chunk.size());
                 SRV_DBG("http: streamed chunk: %s\n", chunk.c_str());
             }
@@ -407,7 +420,19 @@ static void process_handler_response(server_http_req_ptr && request, server_http
             }
             return has_next;
         };
-        const auto on_complete = [request = q_ptr, response = r_ptr](bool) mutable {
+        const auto on_complete = [request = q_ptr, response = r_ptr, trace_state](bool) mutable {
+            if (request->trace && !request->trace_request_id.empty()) {
+                const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                        std::chrono::steady_clock::now() - request->trace_started_at).count();
+                request->trace->log_response_finish(
+                        request->trace_request_id,
+                        response->status,
+                        response->content_type,
+                        response->headers,
+                        trace_state->full_body,
+                        duration_ms,
+                        true);
+            }
             response.reset(); // trigger the destruction of the response object
             request.reset();  // trigger the destruction of the request object
         };
@@ -416,36 +441,65 @@ static void process_handler_response(server_http_req_ptr && request, server_http
         res.status = response->status;
         set_headers(res, response->headers);
         res.set_content(response->data, response->content_type);
+        if (request->trace && !request->trace_request_id.empty()) {
+            const auto duration_ms = std::chrono::duration_cast<std::chrono::milliseconds>(
+                    std::chrono::steady_clock::now() - request->trace_started_at).count();
+            request->trace->log_response_finish(
+                    request->trace_request_id,
+                    response->status,
+                    response->content_type,
+                    response->headers,
+                    response->data,
+                    duration_ms,
+                    false);
+        }
     }
 }
 
 void server_http_context::get(const std::string & path, const server_http_context::handler_t & handler) const {
-    pimpl->srv->Get(path_prefix + path, [handler](const httplib::Request & req, httplib::Response & res) {
+    auto trace = pimpl->trace;
+    pimpl->srv->Get(path_prefix + path, [handler, trace](const httplib::Request & req, httplib::Response & res) {
         server_http_req_ptr request = std::make_unique<server_http_req>(server_http_req{
             get_params(req),
             get_headers(req),
+            req.method,
             req.path,
             build_query_string(req),
             req.body,
-            req.is_connection_closed
+            req.is_connection_closed,
+            trace,
+            "",
+            std::chrono::steady_clock::now(),
         });
+        if (trace && trace->should_trace(request->method, request->path)) {
+            request->trace_request_id = trace->log_request_start(
+                    request->method, request->path, request->query_string, request->headers, request->body);
+        }
         server_http_res_ptr response = handler(*request);
         process_handler_response(std::move(request), response, res);
     });
 }
 
 void server_http_context::post(const std::string & path, const server_http_context::handler_t & handler) const {
-    pimpl->srv->Post(path_prefix + path, [handler](const httplib::Request & req, httplib::Response & res) {
+    auto trace = pimpl->trace;
+    pimpl->srv->Post(path_prefix + path, [handler, trace](const httplib::Request & req, httplib::Response & res) {
         server_http_req_ptr request = std::make_unique<server_http_req>(server_http_req{
             get_params(req),
             get_headers(req),
+            req.method,
             req.path,
             build_query_string(req),
             req.body,
-            req.is_connection_closed
+            req.is_connection_closed,
+            trace,
+            "",
+            std::chrono::steady_clock::now(),
         });
+        if (trace && trace->should_trace(request->method, request->path)) {
+            request->trace_request_id = trace->log_request_start(
+                    request->method, request->path, request->query_string, request->headers, request->body);
+        }
         server_http_res_ptr response = handler(*request);
         process_handler_response(std::move(request), response, res);
     });
 }
-

@@ -2956,6 +2956,20 @@ common_params_context common_params_parser_init(common_params & params, llama_ex
         }
     ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_THREADS_HTTP"));
     add_opt(common_arg(
+        {"--http-trace-dir"}, "PATH",
+        string_format("directory for optional HTTP JSONL traces (default: %s)", params.http_trace_dir.empty() ? "disabled" : params.http_trace_dir.c_str()),
+        [](common_params & params, const std::string & value) {
+            params.http_trace_dir = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_HTTP_TRACE_DIR"));
+    add_opt(common_arg(
+        {"--http-trace-max-bytes"}, "N",
+        string_format("max bytes of request/response bodies to store in HTTP traces (default: %d)", params.http_trace_max_bytes),
+        [](common_params & params, int value) {
+            params.http_trace_max_bytes = value;
+        }
+    ).set_examples({LLAMA_EXAMPLE_SERVER}).set_env("LLAMA_ARG_HTTP_TRACE_MAX_BYTES"));
+    add_opt(common_arg(
         {"--cache-prompt"},
         {"--no-cache-prompt"},
         string_format("whether to enable prompt caching (default: %s)", params.cache_prompt ? "enabled" : "disabled"),
