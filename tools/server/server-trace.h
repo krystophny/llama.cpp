@@ -41,6 +41,7 @@ private:
     std::string trace_path;
     int32_t max_body_bytes;
     std::atomic<uint64_t> next_request_id = 0;
+    std::atomic<uint64_t> next_record_seq = 0;
     std::mutex file_mutex;
 
     void write_record(const json & record);

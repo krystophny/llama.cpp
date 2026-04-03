@@ -185,12 +185,14 @@ void server_http_trace::log_stream_event(
 
 void server_http_trace::write_record(const json & record) {
     std::lock_guard<std::mutex> lock(file_mutex);
+    json enriched = record;
+    enriched["trace_seq"] = ++next_record_seq;
     std::ofstream out(trace_path, std::ios::app);
     if (!out) {
         LOG_ERR("failed to open HTTP trace file: %s\n", trace_path.c_str());
         return;
     }
-    out << record.dump() << '\n';
+    out << enriched.dump() << '\n';
 }
 
 std::shared_ptr<server_http_trace> server_http_trace_create(const common_params & params) {
