@@ -4,6 +4,8 @@
 
 #include <atomic>
 #include <chrono>
+#include <filesystem>
+#include <map>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -38,13 +40,19 @@ public:
             const std::string & chunk);
 
 private:
-    std::string trace_path;
+    struct request_trace_file {
+        std::filesystem::path temp_path;
+        std::filesystem::path final_path;
+    };
+
+    std::string trace_dir;
     int32_t max_body_bytes;
     std::atomic<uint64_t> next_request_id = 0;
     std::atomic<uint64_t> next_record_seq = 0;
     std::mutex file_mutex;
+    std::map<std::string, request_trace_file> active_requests;
 
-    void write_record(const json & record);
+    bool append_record(const std::filesystem::path & path, const json & record, uint64_t trace_seq);
 };
 
 std::shared_ptr<server_http_trace> server_http_trace_create(const common_params & params);

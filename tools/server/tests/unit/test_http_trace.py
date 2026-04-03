@@ -16,10 +16,15 @@ def create_server(tmp_path: Path):
     server.http_trace_max_bytes = 4096
 
 
-def read_trace_records() -> list[dict]:
-    trace_path = Path(server.http_trace_dir) / "http-trace.jsonl"
-    assert trace_path.exists(), f"missing trace file at {trace_path}"
-    return [json.loads(line) for line in trace_path.read_text().splitlines() if line.strip()]
+def read_trace_request_files() -> list[Path]:
+    trace_dir = Path(server.http_trace_dir)
+    assert trace_dir.exists(), f"missing trace dir at {trace_dir}"
+    return sorted(trace_dir.glob("*.jsonl"))
+
+
+def read_trace_records(path: Path) -> list[dict]:
+    assert path.exists(), f"missing trace file at {path}"
+    return [json.loads(line) for line in path.read_text().splitlines() if line.strip()]
 
 
 def test_http_trace_chat_completion_non_stream():
@@ -35,7 +40,9 @@ def test_http_trace_chat_completion_non_stream():
     assert res.status_code == 200
     server.stop()
 
-    records = read_trace_records()
+    files = read_trace_request_files()
+    assert len(files) == 1
+    records = read_trace_records(files[0])
     assert [record["type"] for record in records] == ["request_start", "response_finish"]
     assert records[0]["path"] == "/v1/chat/completions"
     assert records[0]["trace_seq"] == 1
@@ -62,7 +69,9 @@ def test_http_trace_chat_completion_stream():
     assert chunks
     server.stop()
 
-    records = read_trace_records()
+    files = read_trace_request_files()
+    assert len(files) == 1
+    records = read_trace_records(files[0])
     assert records[0]["type"] == "request_start"
     assert records[-1]["type"] == "response_finish"
     assert records[-1]["stream"] is True
@@ -89,7 +98,9 @@ def test_http_trace_responses_non_stream():
     assert res.status_code == 200
     server.stop()
 
-    records = read_trace_records()
+    files = read_trace_request_files()
+    assert len(files) == 1
+    records = read_trace_records(files[0])
     assert [record["type"] for record in records] == ["request_start", "response_finish"]
     assert records[0]["path"] == "/v1/responses"
     assert records[0]["trace_seq"] == 1
@@ -117,7 +128,9 @@ def test_http_trace_responses_stream():
     assert chunks
     server.stop()
 
-    records = read_trace_records()
+    files = read_trace_request_files()
+    assert len(files) == 1
+    records = read_trace_records(files[0])
     assert records[0]["type"] == "request_start"
     assert records[-1]["type"] == "response_finish"
     assert records[-1]["stream"] is True
@@ -128,7 +141,7 @@ def test_http_trace_responses_stream():
     assert all(record["request_id"] == records[0]["request_id"] for record in records)
 
 
-def test_http_trace_appends_multiple_requests_with_monotonic_trace_seq():
+def test_http_trace_writes_one_file_per_request():
     global server
     server.start()
     first = server.make_request("POST", "/v1/chat/completions", data={
@@ -150,6 +163,37 @@ def test_http_trace_appends_multiple_requests_with_monotonic_trace_seq():
     assert second.status_code == 200
     server.stop()
 
-    records = read_trace_records()
-    assert len({record["request_id"] for record in records if record["type"] == "request_start"}) == 2
-    assert [record["trace_seq"] for record in records] == list(range(1, len(records) + 1))
+    files = read_trace_request_files()
+    assert len(files) == 2
+    all_records = [read_trace_records(path) for path in files]
+    assert [records[0]["type"] for records in all_records] == ["request_start", "request_start"]
+    assert [records[-1]["type"] for records in all_records] == ["response_finish", "response_finish"]
+    assert files[0].name < files[1].name
+
+
+def test_http_trace_uses_tmp_file_while_stream_active():
+    global server
+    server.start()
+    stream = server.make_stream_request("POST", "/v1/responses", data={
+        "model": "gpt-4.1",
+        "input": [
+            {"role": "system", "content": "Book"},
+            {"role": "user", "content": "What is the best book"},
+        ],
+        "max_output_tokens": 16,
+        "temperature": 0.8,
+        "stream": True,
+    })
+    first_chunk = next(stream)
+    assert first_chunk
+    trace_dir = Path(server.http_trace_dir)
+    tmp_files = sorted(trace_dir.glob("*.jsonl.tmp"))
+    assert len(tmp_files) == 1
+    assert tmp_files[0].read_text()
+
+    chunks = list(stream)
+    assert chunks
+    server.stop()
+
+    assert not list(trace_dir.glob("*.jsonl.tmp"))
+    assert len(read_trace_request_files()) == 1

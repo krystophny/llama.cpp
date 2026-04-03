@@ -48,6 +48,12 @@ static std::string lower_ascii(std::string value) {
     return value;
 }
 
+static std::string zero_pad_u64(uint64_t value) {
+    std::ostringstream oss;
+    oss << std::setfill('0') << std::setw(12) << value;
+    return oss.str();
+}
+
 static json sanitize_headers(const std::map<std::string, std::string> & headers) {
     json out = json::object();
     for (const auto & [key, value] : headers) {
@@ -90,13 +96,13 @@ static json summarize_body(const std::string & body, int32_t max_body_bytes) {
 }  // namespace
 
 server_http_trace::server_http_trace(const std::string & trace_dir, int32_t max_body_bytes)
-    : trace_path((std::filesystem::path(trace_dir) / "http-trace.jsonl").string()),
+    : trace_dir(trace_dir),
       max_body_bytes(max_body_bytes) {
     std::filesystem::create_directories(trace_dir);
 }
 
 bool server_http_trace::enabled() const {
-    return !trace_path.empty();
+    return !trace_dir.empty();
 }
 
 bool server_http_trace::should_trace(const std::string & method, const std::string & path) const {
@@ -114,6 +120,10 @@ std::string server_http_trace::log_request_start(
         const std::string & body) {
     const uint64_t id_num = ++next_request_id;
     const std::string request_id = string_format("req-%" PRIu64, id_num);
+    const uint64_t trace_seq = ++next_record_seq;
+    const std::string base_name = zero_pad_u64(trace_seq) + "_" + request_id + ".jsonl";
+    const auto temp_path = std::filesystem::path(trace_dir) / (base_name + ".tmp");
+    const auto final_path = std::filesystem::path(trace_dir) / base_name;
 
     json record = {
         {"type", "request_start"},
@@ -128,7 +138,12 @@ std::string server_http_trace::log_request_start(
     for (const auto & item : body_summary.items()) {
         record[item.key()] = item.value();
     }
-    write_record(record);
+    std::lock_guard<std::mutex> lock(file_mutex);
+    if (!append_record(temp_path, record, trace_seq)) {
+        next_record_seq--;
+        return request_id;
+    }
+    active_requests.emplace(request_id, request_trace_file{temp_path, final_path});
     return request_id;
 }
 
@@ -141,6 +156,13 @@ void server_http_trace::log_response_finish(
         int64_t duration_ms,
         bool stream,
         const std::string & error) {
+    std::lock_guard<std::mutex> lock(file_mutex);
+    const auto it = active_requests.find(request_id);
+    if (it == active_requests.end()) {
+        LOG_ERR("missing HTTP trace request state for %s\n", request_id.c_str());
+        return;
+    }
+
     json record = {
         {"type", "response_finish"},
         {"ts", trace_timestamp_now()},
@@ -163,13 +185,34 @@ void server_http_trace::log_response_finish(
             record[item.key()] = item.value();
         }
     }
-    write_record(record);
+    const uint64_t trace_seq = ++next_record_seq;
+    if (!append_record(it->second.temp_path, record, trace_seq)) {
+        next_record_seq--;
+        return;
+    }
+    std::error_code ec;
+    std::filesystem::rename(it->second.temp_path, it->second.final_path, ec);
+    if (ec) {
+        LOG_ERR("failed to finalize HTTP trace file %s -> %s: %s\n",
+                it->second.temp_path.string().c_str(),
+                it->second.final_path.string().c_str(),
+                ec.message().c_str());
+        return;
+    }
+    active_requests.erase(it);
 }
 
 void server_http_trace::log_stream_event(
         const std::string & request_id,
         uint64_t sequence,
         const std::string & chunk) {
+    std::lock_guard<std::mutex> lock(file_mutex);
+    const auto it = active_requests.find(request_id);
+    if (it == active_requests.end()) {
+        LOG_ERR("missing HTTP trace request state for %s\n", request_id.c_str());
+        return;
+    }
+
     json record = {
         {"type", "stream_event"},
         {"ts", trace_timestamp_now()},
@@ -180,19 +223,26 @@ void server_http_trace::log_stream_event(
     for (const auto & item : body_summary.items()) {
         record[item.key()] = item.value();
     }
-    write_record(record);
+    const uint64_t trace_seq = ++next_record_seq;
+    if (!append_record(it->second.temp_path, record, trace_seq)) {
+        next_record_seq--;
+    }
 }
 
-void server_http_trace::write_record(const json & record) {
-    std::lock_guard<std::mutex> lock(file_mutex);
+bool server_http_trace::append_record(const std::filesystem::path & path, const json & record, uint64_t trace_seq) {
     json enriched = record;
-    enriched["trace_seq"] = ++next_record_seq;
-    std::ofstream out(trace_path, std::ios::app);
+    enriched["trace_seq"] = trace_seq;
+    std::ofstream out(path, std::ios::app);
     if (!out) {
-        LOG_ERR("failed to open HTTP trace file: %s\n", trace_path.c_str());
-        return;
+        LOG_ERR("failed to open HTTP trace file: %s\n", path.string().c_str());
+        return false;
     }
     out << enriched.dump() << '\n';
+    if (!out) {
+        LOG_ERR("failed to write HTTP trace file: %s\n", path.string().c_str());
+        return false;
+    }
+    return true;
 }
 
 std::shared_ptr<server_http_trace> server_http_trace_create(const common_params & params) {
