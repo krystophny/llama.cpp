@@ -580,6 +580,16 @@ static ggml_guid_t ggml_backend_metal_guid(void) {
     return &guid;
 }
 
+static int ggml_backend_metal_default_n_cb(void) {
+    const char * val = getenv("GGML_METAL_N_CB");
+    if (val == NULL || val[0] == '\0') {
+        return 1;
+    }
+
+    const int n_cb = atoi(val);
+    return n_cb > 0 ? n_cb : 1;
+}
+
 ggml_backend_t ggml_backend_metal_init(void) {
     ggml_backend_dev_t dev = ggml_backend_reg_dev_get(ggml_backend_metal_reg(), 0);
     ggml_metal_device_t ctx_dev = (ggml_metal_device_t)dev->context;
@@ -599,7 +609,7 @@ ggml_backend_t ggml_backend_metal_init(void) {
         /* .context   = */ ctx,
     };
 
-    ggml_backend_metal_set_n_cb(backend, 1);
+    ggml_backend_metal_set_n_cb(backend, ggml_backend_metal_default_n_cb());
 
     return backend;
 }
@@ -693,7 +703,7 @@ static ggml_backend_t ggml_backend_metal_device_init_backend(ggml_backend_dev_t 
         /* .context   = */ ctx,
     };
 
-    ggml_backend_metal_set_n_cb(backend, 1);
+    ggml_backend_metal_set_n_cb(backend, ggml_backend_metal_default_n_cb());
 
     return backend;
 
