@@ -460,8 +460,13 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
     @autoreleasepool {
         ctx->gf = gf;
 
-        ctx->n_nodes_0 = MIN(n_main, gf->n_nodes);
-        ctx->n_nodes_1 = gf->n_nodes - ctx->n_nodes_0;
+        if (ctx->n_cb == 1) {
+            ctx->n_nodes_0 = gf->n_nodes;
+            ctx->n_nodes_1 = 0;
+        } else {
+            ctx->n_nodes_0 = MIN(n_main, gf->n_nodes);
+            ctx->n_nodes_1 = gf->n_nodes - ctx->n_nodes_0;
+        }
 
         ctx->n_nodes_per_cb = (ctx->n_nodes_1 + ctx->n_cb - 1) / ctx->n_cb;
 
@@ -524,6 +529,29 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
 
         // remember the command buffer for the next iteration
         ctx->cmd_buf_last = ctx->cmd_bufs[n_cb].obj;
+
+        if (ctx->n_nodes_1 == 0) {
+            if (use_capture && ctx->capture_started) {
+                id<MTLCommandBuffer> cmd_buf = ctx->cmd_bufs[n_cb].obj;
+                [cmd_buf waitUntilCompleted];
+
+                MTLCommandBufferStatus status = [cmd_buf status];
+                if (status != MTLCommandBufferStatusCompleted) {
+                    GGML_LOG_INFO("%s: command buffer %d failed with status %lu\n", __func__, n_cb, status);
+                    if (status == MTLCommandBufferStatusError) {
+                        GGML_LOG_INFO("error: %s\n", [[cmd_buf error].localizedDescription UTF8String]);
+                    }
+
+                    return GGML_STATUS_FAILED;
+                }
+
+                [ctx->capture_scope endScope];
+                [[MTLCaptureManager sharedCaptureManager] stopCapture];
+                ctx->capture_started = false;
+            }
+
+            return GGML_STATUS_SUCCESS;
+        }
 
         // prepare the rest of the command buffers asynchronously (optional)
         // cmd_buf[0.. n_cb)
