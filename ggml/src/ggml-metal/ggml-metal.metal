@@ -9302,19 +9302,13 @@ kernel void kernel_mul_mm(
         threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
 
         FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
-            simdgroup_barrier(mem_flags::mem_none);
-
             FOR_UNROLL (short i = 0; i < 4; i++) {
                 simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
             }
 
-            simdgroup_barrier(mem_flags::mem_none);
-
             FOR_UNROLL (short i = 0; i < 2; i++) {
                 simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
             }
-
-            simdgroup_barrier(mem_flags::mem_none);
 
             FOR_UNROLL (short i = 0; i < 8; i++){
                 simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
@@ -9690,19 +9684,13 @@ kernel void kernel_mul_mm_id(
         threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
 
         FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
-            simdgroup_barrier(mem_flags::mem_none);
-
             FOR_UNROLL (short i = 0; i < 4; i++) {
                 simdgroup_load(ma[i], lsma + 64*i, 8, 0, false);
             }
 
-            simdgroup_barrier(mem_flags::mem_none);
-
             FOR_UNROLL (short i = 0; i < 2; i++) {
                 simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
             }
-
-            simdgroup_barrier(mem_flags::mem_none);
 
             FOR_UNROLL (short i = 0; i < 8; i++){
                 simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
