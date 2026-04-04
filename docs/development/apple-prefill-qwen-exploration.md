@@ -253,18 +253,14 @@ The baseline tools are already here:
 
 ### Baseline models
 
-Use smaller Qwen3.5 models first to make iteration practical:
+Use two representative Qwen baselines first:
 
-- `Qwen3.5-0.8B`
-- `Qwen3.5-4B`
 - `Qwen3.5-9B`
-
-If time allows:
-
-- `Qwen3.5-27B`
+- `Qwen3.5-35B-A3B`
 
 The goal is not to reproduce production latency exactly. The goal is to identify which prompt
-processing trends scale reliably across Qwen3.5 family members and quant levels.
+processing trends scale reliably across practical Qwen prompt-processing regimes without making
+the first pass too expensive to run repeatedly.
 
 ### Quantization matrix
 
@@ -282,6 +278,7 @@ Use whichever exact `Q4_*` / `Q5_*` files exist in the repo for the chosen model
 For each `(model, quant)` pair:
 
 - prompt sizes: `1024`, `4096`, `8192`, `16384`
+- prompt-cache depth / shared-prefix depth: start with `0`
 - `n_gen = 0`
 - `flash-attn = 0,1`
 - `n_batch / n_ubatch`:
@@ -354,14 +351,46 @@ small exploration.
 
 ## Deliverables
 
-This exploration draft is paired with three simple helpers:
+This exploration draft is paired with five simple helpers:
 
 - `scripts/apple/bench-prefill-qwen.sh`
-  - runs the prompt-processing matrix
+  - runs one prompt-processing matrix slice for one model and one runtime variant
 - `scripts/apple/sample-prefill-hotpath.sh`
   - captures a short `sample(1)` hotspot profile for either a live PID or a spawned benchmark
 - `scripts/apple/summarize-prefill-jsonl.py`
   - reduces raw `llama-bench` JSONL into CSV or Markdown summaries
+- `scripts/apple/compare-prefill-results.py`
+  - compares each variant against `baseline` across the same matrix point
+- `scripts/apple/run-prefill-exploration.sh`
+  - orchestrates the default `9B + 35B-A3B` matrix and emits one consolidated comparison
+
+## Default Execution Path
+
+The intended default entry point is:
+
+- `scripts/apple/run-prefill-exploration.sh`
+
+This runner is deliberately conservative:
+
+- it uses only repo-local tools plus Python stdlib
+- it defaults to the agreed matrix:
+  - `Qwen3.5-9B`
+  - `Qwen3.5-35B-A3B`
+  - `Q8_0`, `Q6_K`, `Q5_K_M`, `Q4_K_M`
+  - prompt sizes `1024`, `4096`, `8192`, `16384`
+  - depth `0`
+  - `baseline`, `tensor-enable`, `tensor-disable`
+- it refuses to spawn benchmarks while the live local FortBench production run is active unless
+  the operator explicitly sets `ALLOW_WITH_LIVE_FORTBENCH=1`
+- it can still be validated safely with `DRY_RUN=1`
+
+The runner writes:
+
+- per-run raw JSONL/stderr
+- per-slice `summary.csv` and `summary.md`
+- one top-level `comparison.csv`
+- one top-level `comparison.md`
+- `suite.env` capturing the exact benchmark matrix and env used
 
 These helpers are deliberately minimal and dependency-free.
 

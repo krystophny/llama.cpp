@@ -10,14 +10,25 @@ from pathlib import Path
 def parse_name(path: Path) -> dict[str, str]:
     stem = path.stem
     parts = stem.split("__")
-    result = {"variant": "", "quant": "", "prompt": "", "fa": "", "batch": "", "ubatch": ""}
-    if len(parts) >= 6:
-        result["variant"] = parts[0]
-        result["quant"] = parts[1]
-        result["prompt"] = parts[2].removeprefix("p")
-        result["fa"] = parts[3].removeprefix("fa")
-        result["batch"] = parts[4].removeprefix("b")
-        result["ubatch"] = parts[5].removeprefix("ub")
+    result = {
+        "model_label": "",
+        "variant": "",
+        "quant": "",
+        "prompt": "",
+        "depth": "",
+        "fa": "",
+        "batch": "",
+        "ubatch": "",
+    }
+    if len(parts) >= 8:
+        result["model_label"] = parts[0]
+        result["variant"] = parts[1]
+        result["quant"] = parts[2]
+        result["prompt"] = parts[3].removeprefix("p")
+        result["depth"] = parts[4].removeprefix("d")
+        result["fa"] = parts[5].removeprefix("fa")
+        result["batch"] = parts[6].removeprefix("b")
+        result["ubatch"] = parts[7].removeprefix("ub")
     return result
 
 
@@ -51,9 +62,11 @@ def load_rows(input_dir: Path) -> list[dict[str, str]]:
 
 def write_csv(rows: list[dict[str, str]], path: Path) -> None:
     fieldnames = [
+        "model_label",
         "variant",
         "quant",
         "prompt",
+        "depth",
         "fa",
         "batch",
         "ubatch",
@@ -77,15 +90,15 @@ def write_csv(rows: list[dict[str, str]], path: Path) -> None:
 
 def write_markdown(rows: list[dict[str, str]], path: Path) -> None:
     header = (
-        "| variant | quant | prompt | fa | batch | ubatch | avg_ts | stddev_ts | backend | model_type |\n"
-        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |\n"
+        "| model | variant | quant | prompt | depth | fa | batch | ubatch | avg_ts | stddev_ts | backend | model_type |\n"
+        "| --- | --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | --- | --- |\n"
     )
     lines = [header]
     for row in rows:
         lines.append(
-            f"| {row['variant']} | {row['quant']} | {row['prompt']} | {row['fa']} | "
-            f"{row['batch']} | {row['ubatch']} | {row['avg_ts']} | {row['stddev_ts']} | "
-            f"{row['backend']} | {row['model_type']} |\n"
+            f"| {row['model_label']} | {row['variant']} | {row['quant']} | {row['prompt']} | "
+            f"{row['depth']} | {row['fa']} | {row['batch']} | {row['ubatch']} | "
+            f"{row['avg_ts']} | {row['stddev_ts']} | {row['backend']} | {row['model_type']} |\n"
         )
     path.write_text("".join(lines))
 
