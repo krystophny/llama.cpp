@@ -547,7 +547,11 @@ enum ggml_status ggml_metal_graph_compute(ggml_metal_t ctx, struct ggml_cgraph *
             }
         }
 
-        dispatch_apply(n_cb, ctx->d_queue, ctx->encode_async);
+        if (n_cb == 1) {
+            ctx->encode_async(0);
+        } else {
+            dispatch_apply(n_cb, ctx->d_queue, ctx->encode_async);
+        }
 
         // for debugging: block until graph is computed
         //[ctx->cmd_buf_last waitUntilCompleted];
