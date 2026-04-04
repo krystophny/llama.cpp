@@ -197,3 +197,33 @@ def test_http_trace_uses_tmp_file_while_stream_active():
 
     assert not list(trace_dir.glob("*.jsonl.tmp"))
     assert len(read_trace_request_files()) == 1
+
+
+def test_http_trace_finalizes_active_request_on_shutdown():
+    global server
+    server.start()
+    stream = server.make_stream_request("POST", "/v1/responses", data={
+        "model": "gpt-4.1",
+        "input": [
+            {"role": "system", "content": "Book"},
+            {"role": "user", "content": "What is the best book"},
+        ],
+        "max_output_tokens": 64,
+        "temperature": 0.8,
+        "stream": True,
+    })
+    first_chunk = next(stream)
+    assert first_chunk
+    trace_dir = Path(server.http_trace_dir)
+    assert len(list(trace_dir.glob("*.jsonl.tmp"))) == 1
+
+    server.stop()
+
+    assert not list(trace_dir.glob("*.jsonl.tmp"))
+    files = read_trace_request_files()
+    assert len(files) == 1
+    records = read_trace_records(files[0])
+    assert records[-1]["type"] == "response_finish"
+    assert records[-1]["status"] in (200, 499)
+    if records[-1]["status"] == 499:
+        assert records[-1]["aborted"] is True

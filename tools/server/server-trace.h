@@ -13,6 +13,7 @@
 class server_http_trace {
 public:
     server_http_trace(const std::string & trace_dir, int32_t max_body_bytes);
+    ~server_http_trace();
 
     bool enabled() const;
     bool should_trace(const std::string & method, const std::string & path) const;
@@ -53,6 +54,7 @@ private:
     std::map<std::string, request_trace_file> active_requests;
 
     bool append_record(const std::filesystem::path & path, const json & record, uint64_t trace_seq);
+    void finalize_active_requests_locked();
 };
 
 std::shared_ptr<server_http_trace> server_http_trace_create(const common_params & params);

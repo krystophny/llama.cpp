@@ -101,6 +101,14 @@ server_http_trace::server_http_trace(const std::string & trace_dir, int32_t max_
     std::filesystem::create_directories(trace_dir);
 }
 
+server_http_trace::~server_http_trace() {
+    if (!enabled()) {
+        return;
+    }
+    std::lock_guard<std::mutex> lock(file_mutex);
+    finalize_active_requests_locked();
+}
+
 bool server_http_trace::enabled() const {
     return !trace_dir.empty();
 }
@@ -243,6 +251,36 @@ bool server_http_trace::append_record(const std::filesystem::path & path, const 
         return false;
     }
     return true;
+}
+
+void server_http_trace::finalize_active_requests_locked() {
+    for (auto it = active_requests.begin(); it != active_requests.end(); ) {
+        json record = {
+            {"type", "response_finish"},
+            {"ts", trace_timestamp_now()},
+            {"request_id", it->first},
+            {"status", 499},
+            {"content_type", "application/json"},
+            {"headers", json::object()},
+            {"duration_ms", 0},
+            {"stream", true},
+            {"error", "trace aborted before response finished"},
+            {"aborted", true},
+            {"body_bytes", 0},
+            {"body_hash_fnv1a64", fnv1a_hex("")},
+        };
+        const uint64_t trace_seq = ++next_record_seq;
+        append_record(it->second.temp_path, record, trace_seq);
+        std::error_code ec;
+        std::filesystem::rename(it->second.temp_path, it->second.final_path, ec);
+        if (ec) {
+            LOG_ERR("failed to finalize aborted HTTP trace file %s -> %s: %s\n",
+                    it->second.temp_path.string().c_str(),
+                    it->second.final_path.string().c_str(),
+                    ec.message().c_str());
+        }
+        it = active_requests.erase(it);
+    }
 }
 
 std::shared_ptr<server_http_trace> server_http_trace_create(const common_params & params) {
