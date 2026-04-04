@@ -8,11 +8,9 @@ OUT_DIR="${OUT_DIR:-${TMPDIR:-/tmp}/llama.cpp-apple-prefill-samples/$(date +%Y%m
 PID="${PID:-}"
 SAMPLE_SECONDS="${SAMPLE_SECONDS:-5}"
 
-HF_REPO="${HF_REPO:-lmstudio-community/Qwen3.5-9B-GGUF}"
-MODEL_PATH="${MODEL_PATH:-}"
+HF_REPO="${HF_REPO:-lmstudio-community/Qwen3.5-4B-GGUF}"
 QUANT="${QUANT:-Q4_K_M}"
 PROMPT="${PROMPT:-8192}"
-DEPTH="${DEPTH:-0}"
 THREADS="${THREADS:-8}"
 N_GPU_LAYERS="${N_GPU_LAYERS:-99}"
 BATCH="${BATCH:-2048}"
@@ -20,11 +18,6 @@ UBATCH="${UBATCH:-512}"
 FLASH_ATTN="${FLASH_ATTN:-1}"
 PRIO="${PRIO:--1}"
 SPAWN_BENCH="${SPAWN_BENCH:-0}"
-ALLOW_WITH_LIVE_FORTBENCH="${ALLOW_WITH_LIVE_FORTBENCH:-0}"
-
-check_live_fortbench() {
-    pgrep -af 'fortbench run-suite .*pilot-runnable-20-local-all|llama-server.*Qwen3\.5-122B-A10B|llama-server.*Qwen3\.5-35B-A3B' >/dev/null
-}
 
 mkdir -p "${OUT_DIR}"
 
@@ -41,33 +34,20 @@ if [[ "${SPAWN_BENCH}" == "1" ]]; then
         echo "missing llama-bench binary: ${LLAMA_BENCH_BIN}" >&2
         exit 1
     fi
-    if [[ "${ALLOW_WITH_LIVE_FORTBENCH}" != "1" ]] && check_live_fortbench; then
-        echo "refusing to spawn a profiling benchmark while live FortBench local production is active" >&2
-        echo "set ALLOW_WITH_LIVE_FORTBENCH=1 to override intentionally" >&2
-        exit 1
-    fi
 
-    args=(
-        -p "${PROMPT}"
-        -n 0
-        -d "${DEPTH}"
-        -r 1
-        -t "${THREADS}"
-        -ngl "${N_GPU_LAYERS}"
-        -b "${BATCH}"
-        -ub "${UBATCH}"
-        -fa "${FLASH_ATTN}"
-        --prio "${PRIO}"
-        --no-warmup
-        -o jsonl
-    )
-    if [[ -n "${MODEL_PATH}" ]]; then
-        args=(-m "${MODEL_PATH}" "${args[@]}")
-    else
-        args=(-hf "${HF_REPO}:${QUANT}" "${args[@]}")
-    fi
-
-    "${LLAMA_BENCH_BIN}" "${args[@]}" \
+    "${LLAMA_BENCH_BIN}" \
+        -hf "${HF_REPO}:${QUANT}" \
+        -p "${PROMPT}" \
+        -n 0 \
+        -r 1 \
+        -t "${THREADS}" \
+        -ngl "${N_GPU_LAYERS}" \
+        -b "${BATCH}" \
+        -ub "${UBATCH}" \
+        -fa "${FLASH_ATTN}" \
+        --prio "${PRIO}" \
+        --no-warmup \
+        -o jsonl \
         > "${OUT_DIR}/bench.jsonl" \
         2> "${OUT_DIR}/bench.stderr.log" &
     bench_pid=$!
