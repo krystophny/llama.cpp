@@ -1286,9 +1286,7 @@ struct ggml_metal_buffer_wrapper {
 struct ggml_metal_tensor_extra_q4_K_ctx {
     const struct ggml_tensor * tensor;
     id<MTLBuffer> q;
-    id<MTLBuffer> s;
-    id<MTLBuffer> d;
-    id<MTLBuffer> dm;
+    id<MTLBuffer> sb;
     struct ggml_metal_tensor_extra_q4_K_ctx * next;
 };
 
@@ -1432,9 +1430,7 @@ static void ggml_metal_buffer_free_q4_K_aux_ctx(struct ggml_metal_tensor_extra_q
     }
 
     [ctx->q release];
-    [ctx->s release];
-    [ctx->d release];
-    [ctx->dm release];
+    [ctx->sb release];
     free(ctx);
 }
 
@@ -1448,6 +1444,16 @@ static void ggml_metal_buffer_clear_q4_K_aux(ggml_metal_buffer_t buf) {
     buf->q4_k_aux = NULL;
 }
 
+enum {
+    GGML_METAL_Q4_K_FAST_TILE_K             = 512,
+    GGML_METAL_Q4_K_FAST_BLOCKS_PER_TILE    = GGML_METAL_Q4_K_FAST_TILE_K / QK_K,
+    GGML_METAL_Q4_K_FAST_ROWS_PER_SIMDGROUP = 2,
+    GGML_METAL_Q4_K_FAST_SIMDGROUPS         = 2,
+    GGML_METAL_Q4_K_FAST_ROWS_PER_GROUP     = GGML_METAL_Q4_K_FAST_ROWS_PER_SIMDGROUP * GGML_METAL_Q4_K_FAST_SIMDGROUPS,
+    GGML_METAL_Q4_K_FAST_SUBBLOCKS_PER_TILE = GGML_METAL_Q4_K_FAST_TILE_K / 32,
+    GGML_METAL_Q4_K_FAST_PACKED_BYTES       = GGML_METAL_Q4_K_FAST_SUBBLOCKS_PER_TILE / 2,
+};
+
 static inline void ggml_metal_unpack_scale_min_q4_K(int j, const uint8_t * q, uint8_t * d, uint8_t * m) {
     if (j < 4) {
         *d = q[j] & 63;
@@ -1458,16 +1464,23 @@ static inline void ggml_metal_unpack_scale_min_q4_K(int j, const uint8_t * q, ui
     }
 }
 
+static inline uint8_t ggml_metal_get_q4_K_pair_byte(const block_q4_K * block, int pair, int lane) {
+    return block->qs[pair * 32 + lane];
+}
+
 static void ggml_metal_buffer_set_tensor_q4_K_aux(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data) {
-    const size_t nb = tensor->ne[0] / QK_K;
-    const size_t nr0 = N_R0_Q4_K;
-    const size_t groups_per_plane = (tensor->ne[1] + nr0 - 1) / nr0;
+    const struct ggml_metal_device_props * props_dev = ggml_metal_device_get_props(buf->dev);
+
+    if (!props_dev->supports_gpu_family_apple7 || tensor->ne[0] % GGML_METAL_Q4_K_FAST_TILE_K != 0) {
+        return;
+    }
+
+    const size_t tiles_per_row = tensor->ne[0] / GGML_METAL_Q4_K_FAST_TILE_K;
+    const size_t groups_per_plane = (tensor->ne[1] + GGML_METAL_Q4_K_FAST_ROWS_PER_GROUP - 1) / GGML_METAL_Q4_K_FAST_ROWS_PER_GROUP;
     const size_t planes = tensor->ne[2] * tensor->ne[3];
-    const size_t nblock_packed = planes * groups_per_plane * nb * nr0;
-    const size_t size_q = nblock_packed * (QK_K / 2);
-    const size_t size_s = nblock_packed * 16;
-    const size_t size_d = nblock_packed * sizeof(ggml_half);
-    const size_t size_dm = nblock_packed * sizeof(ggml_half);
+    const size_t row_tiles = planes * groups_per_plane * tiles_per_row * GGML_METAL_Q4_K_FAST_ROWS_PER_GROUP;
+    const size_t size_q = row_tiles * 32 * GGML_METAL_Q4_K_FAST_PACKED_BYTES;
+    const size_t size_sb = row_tiles * GGML_METAL_Q4_K_FAST_SUBBLOCKS_PER_TILE * sizeof(ggml_half2);
 
     struct ggml_metal_tensor_extra_q4_K_ctx * extra = ggml_metal_buffer_get_q4_K_aux_ctx(buf, tensor);
     if (extra == NULL) {
@@ -1477,31 +1490,21 @@ static void ggml_metal_buffer_set_tensor_q4_K_aux(ggml_metal_buffer_t buf, struc
         buf->q4_k_aux = extra;
     } else {
         [extra->q release];
-        [extra->s release];
-        [extra->d release];
-        [extra->dm release];
+        [extra->sb release];
         extra->q = nil;
-        extra->s = nil;
-        extra->d = nil;
-        extra->dm = nil;
+        extra->sb = nil;
     }
 
     extra->q = [buf->dev->mtl_device newBufferWithLength:size_q options:MTLResourceStorageModeShared];
-    extra->s = [buf->dev->mtl_device newBufferWithLength:size_s options:MTLResourceStorageModeShared];
-    extra->d = [buf->dev->mtl_device newBufferWithLength:size_d options:MTLResourceStorageModeShared];
-    extra->dm = [buf->dev->mtl_device newBufferWithLength:size_dm options:MTLResourceStorageModeShared];
+    extra->sb = [buf->dev->mtl_device newBufferWithLength:size_sb options:MTLResourceStorageModeShared];
 
-    GGML_ASSERT(extra->q != nil && extra->s != nil && extra->d != nil && extra->dm != nil);
+    GGML_ASSERT(extra->q != nil && extra->sb != nil);
 
     uint8_t * dst_q = (uint8_t *) [extra->q contents];
-    uint8_t * dst_s = (uint8_t *) [extra->s contents];
-    ggml_half * dst_d = (ggml_half *) [extra->d contents];
-    ggml_half * dst_dm = (ggml_half *) [extra->dm contents];
+    ggml_half * dst_sb = (ggml_half *) [extra->sb contents];
 
     memset(dst_q, 0, size_q);
-    memset(dst_s, 0, size_s);
-    memset(dst_d, 0, size_d);
-    memset(dst_dm, 0, size_dm);
+    memset(dst_sb, 0, size_sb);
 
     const char * src_base = (const char *) data;
     for (int64_t i3 = 0; i3 < tensor->ne[3]; ++i3) {
@@ -1510,24 +1513,35 @@ static void ggml_metal_buffer_set_tensor_q4_K_aux(ggml_metal_buffer_t buf, struc
             const char * plane_base = src_base + i3 * tensor->nb[3] + i2 * tensor->nb[2];
 
             for (size_t group = 0; group < groups_per_plane; ++group) {
-                for (size_t ib = 0; ib < nb; ++ib) {
-                    for (size_t row_slot = 0; row_slot < nr0; ++row_slot) {
-                        const size_t row = group * nr0 + row_slot;
-                        const size_t dst_index = (((plane * groups_per_plane + group) * nb + ib) * nr0) + row_slot;
-
+                for (size_t tile = 0; tile < tiles_per_row; ++tile) {
+                    for (size_t row_slot = 0; row_slot < GGML_METAL_Q4_K_FAST_ROWS_PER_GROUP; ++row_slot) {
+                        const size_t row = group * GGML_METAL_Q4_K_FAST_ROWS_PER_GROUP + row_slot;
+                        const size_t row_tile = (((plane * groups_per_plane + group) * tiles_per_row + tile) * GGML_METAL_Q4_K_FAST_ROWS_PER_GROUP) + row_slot;
                         if (row >= (size_t) tensor->ne[1]) {
                             continue;
                         }
 
-                        const block_q4_K * src_block = (const block_q4_K *) (plane_base + row * tensor->nb[1]) + ib;
+                        const block_q4_K * src_block = (const block_q4_K *) (plane_base + row * tensor->nb[1]) + tile * GGML_METAL_Q4_K_FAST_BLOCKS_PER_TILE;
+                        uint8_t * dst_q_row = dst_q + row_tile * 32 * GGML_METAL_Q4_K_FAST_PACKED_BYTES;
+                        ggml_half * dst_sb_row = dst_sb + row_tile * GGML_METAL_Q4_K_FAST_SUBBLOCKS_PER_TILE * 2;
 
-                        memcpy(dst_q + dst_index * (QK_K / 2), src_block->qs, QK_K / 2);
-                        uint8_t * dst_sc = dst_s + dst_index * 16;
-                        for (int j = 0; j < 8; ++j) {
-                            ggml_metal_unpack_scale_min_q4_K(j, src_block->scales, &dst_sc[j], &dst_sc[8 + j]);
+                        for (int sub = 0; sub < GGML_METAL_Q4_K_FAST_SUBBLOCKS_PER_TILE; ++sub) {
+                            const block_q4_K * block = src_block + sub / 8;
+                            const int block_sub = sub % 8;
+                            uint8_t sc;
+                            uint8_t m;
+                            ggml_metal_unpack_scale_min_q4_K(block_sub, block->scales, &sc, &m);
+                            dst_sb_row[sub * 2 + 0] = GGML_FP32_TO_FP16(GGML_FP16_TO_FP32(block->d) * sc);
+                            dst_sb_row[sub * 2 + 1] = GGML_FP32_TO_FP16(GGML_FP16_TO_FP32(block->dmin) * m);
                         }
-                        dst_d[dst_index] = src_block->d;
-                        dst_dm[dst_index] = src_block->dmin;
+
+                        for (int lane = 0; lane < 32; ++lane) {
+                            uint8_t * dst_q_lane = dst_q_row + lane * GGML_METAL_Q4_K_FAST_PACKED_BYTES;
+                            for (int pair = 0; pair < GGML_METAL_Q4_K_FAST_PACKED_BYTES; ++pair) {
+                                const block_q4_K * block = src_block + pair / 4;
+                                dst_q_lane[pair] = ggml_metal_get_q4_K_pair_byte(block, pair % 4, lane);
+                            }
+                        }
                     }
                 }
             }
@@ -1884,14 +1898,12 @@ void ggml_metal_buffer_clear(ggml_metal_buffer_t buf, uint8_t value) {
 
 bool ggml_metal_buffer_get_tensor_extra_q4_K(ggml_metal_buffer_t buf, const struct ggml_tensor * t, struct ggml_metal_tensor_extra_q4_K * extra) {
     struct ggml_metal_tensor_extra_q4_K_ctx * ctx = ggml_metal_buffer_get_q4_K_aux_ctx(buf, t);
-    if (ctx == NULL || ctx->q == nil || ctx->s == nil || ctx->d == nil || ctx->dm == nil) {
+    if (ctx == NULL || ctx->q == nil || ctx->sb == nil) {
         return false;
     }
 
     extra->q = (struct ggml_metal_buffer_id) { ctx->q, 0 };
-    extra->s = (struct ggml_metal_buffer_id) { ctx->s, 0 };
-    extra->d = (struct ggml_metal_buffer_id) { ctx->d, 0 };
-    extra->dm = (struct ggml_metal_buffer_id) { ctx->dm, 0 };
+    extra->sb = (struct ggml_metal_buffer_id) { ctx->sb, 0 };
 
     return true;
 }

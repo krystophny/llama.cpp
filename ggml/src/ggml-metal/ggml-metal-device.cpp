@@ -873,14 +873,14 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
     return res;
 }
 
-ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_q4_K_flat(ggml_metal_library_t lib) {
+ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_q4_K_fast(ggml_metal_library_t lib) {
     char base[256];
     char name[256];
 
     const int nsg = N_SG_Q4_K;
-    const int nr0 = N_R0_Q4_K;
+    const int nr0 = 2;
 
-    snprintf(base, 256, "kernel_mul_mv_q4_K_f32_flat");
+    snprintf(base, 256, "kernel_mul_mv_q4_K_f32_fast");
     snprintf(name, 256, "%s_nsg=%d", base, nsg);
 
     ggml_metal_pipeline_with_params res = ggml_metal_library_get_pipeline(lib, name);
@@ -897,7 +897,7 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_q4_K_flat
     res.nr0 = nr0;
     res.nr1 = 1;
     res.nsg = nsg;
-    res.smem = 0;
+    res.smem = 4 * 16 * sizeof(uint32_t);
 
     return res;
 }
