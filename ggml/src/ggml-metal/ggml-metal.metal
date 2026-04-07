@@ -7725,6 +7725,122 @@ kernel void kernel_mul_mv_q4_K_f32_flat(
     kernel_mul_mv_q4_K_f32_flat_impl<N_R0_Q4_K, constant ggml_metal_kargs_mul_mv &>(args, src0_q, src0_s, src0_d, src0_dm, src1, dst, tgpig, tiisg, sgitg);
 }
 
+static inline float ggml_metal_q4_packed_load_vector(
+        device const float * x,
+        thread float * x_thread) {
+    float sum = 0.0f;
+
+    for (int i = 0; i < 16; i += 4) {
+        const float x0 = x[i + 0];
+        const float x1 = x[i + 1];
+        const float x2 = x[i + 2];
+        const float x3 = x[i + 3];
+
+        sum += x0 + x1 + x2 + x3;
+        x_thread[i + 0] = x0;
+        x_thread[i + 1] = x1 * (1.0f / 16.0f);
+        x_thread[i + 2] = x2 * (1.0f / 256.0f);
+        x_thread[i + 3] = x3 * (1.0f / 4096.0f);
+    }
+
+    return sum;
+}
+
+static inline float ggml_metal_q4_packed_qdot(
+        device const uchar * w,
+        thread const float * x_thread) {
+    device const uint16_t * ws = (device const uint16_t *) w;
+    float accum = 0.0f;
+
+    FOR_UNROLL (int i = 0; i < 4; ++i) {
+        const uint16_t v = ws[i];
+        accum += x_thread[4 * i + 0] * (v & 0x000F);
+        accum += x_thread[4 * i + 1] * (v & 0x00F0);
+        accum += x_thread[4 * i + 2] * (v & 0x0F00);
+        accum += x_thread[4 * i + 3] * (v & 0xF000);
+    }
+
+    return accum;
+}
+
+template<int nr0, typename args_t>
+void kernel_mul_mv_q4_K_f32_packed_impl(
+        args_t args,
+        device const uchar * src0_qp,
+        device const half2 * src0_sb,
+        device const char  * src1,
+        device       char  * dst,
+        uint3  tgpig,
+        ushort tiisg,
+        ushort sgitg) {
+    const short NSG = FC_mul_mv_nsg;
+
+    constexpr int tile_k = 512;
+    constexpr int values_per_thread = 16;
+    constexpr int bytes_per_thread = values_per_thread / 2;
+    constexpr int subblocks_per_tile = tile_k / 32;
+    const int rows_per_group = nr0 * NSG;
+    constexpr int bytes_per_row_tile = subblocks_per_tile * 16;
+
+    const int row_group = tgpig.x;
+    const int r1 = tgpig.y;
+    const int im = tgpig.z;
+    const int first_row = row_group * rows_per_group + sgitg * nr0;
+
+    const uint i12 = im % args.ne12;
+    const uint i13 = im / args.ne12;
+
+    const uint64_t groups_per_plane = (args.ne01 + rows_per_group - 1) / rows_per_group;
+    const uint64_t tiles_per_row = args.ne00 / tile_k;
+    const uint64_t offset1 = r1 * args.nb11 + i12 * args.nb12 + i13 * args.nb13;
+
+    device const float * y = (device const float *) (src1 + offset1);
+    float sumf[nr0] = { 0.0f };
+
+    for (uint64_t tile = 0; tile < tiles_per_row; ++tile) {
+        device const float * x = y + tile * tile_k + tiisg * values_per_thread;
+        float x_thread[values_per_thread];
+        const float sumx = ggml_metal_q4_packed_load_vector(x, x_thread);
+        const uint64_t row_tile_base = (((uint64_t) im * groups_per_plane + row_group) * tiles_per_row + tile) * rows_per_group;
+
+        for (int row = 0; row < nr0; ++row) {
+            const int out_row = first_row + row;
+            if (out_row >= args.ne01) {
+                continue;
+            }
+
+            const uint64_t row_tile = row_tile_base + sgitg * nr0 + row;
+            device const uchar * w = src0_qp + row_tile * bytes_per_row_tile + tiisg * bytes_per_thread;
+            const float2 sb = float2(src0_sb[row_tile * subblocks_per_tile + tiisg / 2]);
+
+            sumf[row] += sb.x * ggml_metal_q4_packed_qdot(w, x_thread) + sumx * sb.y;
+        }
+    }
+
+    device float * dst_f32 = (device float *) dst + (int64_t) im * args.ne0 * args.ne1 + (int64_t) r1 * args.ne0;
+
+    for (int row = 0; row < nr0 && first_row + row < args.ne0; ++row) {
+        const float sum_all = simd_sum(sumf[row]);
+        if (tiisg == 0) {
+            dst_f32[first_row + row] = sum_all;
+        }
+    }
+}
+
+[[host_name("kernel_mul_mv_q4_K_f32_packed")]]
+kernel void kernel_mul_mv_q4_K_f32_packed(
+        constant ggml_metal_kargs_mul_mv & args,
+        device const uchar * src0_qp,
+        device const half2 * src0_sb,
+        device const char  * src1,
+        device       char  * dst,
+        uint3  tgpig[[threadgroup_position_in_grid]],
+        ushort tiisg[[thread_index_in_simdgroup]],
+        ushort sgitg[[simdgroup_index_in_threadgroup]]) {
+
+    kernel_mul_mv_q4_K_f32_packed_impl<4, constant ggml_metal_kargs_mul_mv &>(args, src0_qp, src0_sb, src1, dst, tgpig, tiisg, sgitg);
+}
+
 template<int nr0, typename args_t>
 void kernel_mul_mv_q5_K_f32_impl(
         args_t args,
