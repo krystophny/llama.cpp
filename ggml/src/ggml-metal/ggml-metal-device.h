@@ -11,6 +11,13 @@ struct ggml_metal_buffer_id {
     size_t offs;
 };
 
+struct ggml_metal_tensor_extra_q4_K {
+    struct ggml_metal_buffer_id q;
+    struct ggml_metal_buffer_id s;
+    struct ggml_metal_buffer_id d;
+    struct ggml_metal_buffer_id dm;
+};
+
 typedef struct ggml_metal_device * ggml_metal_device_t;
 
 //
@@ -130,6 +137,7 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_solve_tri
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_ext        (ggml_metal_library_t lib, enum ggml_type tsrc0, enum ggml_type tsrc1, int nsg, int nxpsg, int r1ptg);
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm            (ggml_metal_library_t lib, const struct ggml_tensor * op);
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv            (ggml_metal_library_t lib, const struct ggml_tensor * op);
+struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_q4_K_flat  (ggml_metal_library_t lib);
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id_map0    (ggml_metal_library_t lib, int ne02, int ne20);
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mm_id         (ggml_metal_library_t lib, const struct ggml_tensor * op);
 struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id         (ggml_metal_library_t lib, const struct ggml_tensor * op);
@@ -280,6 +288,7 @@ void   ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tens
 void   ggml_metal_buffer_set_tensor   (ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size);
 void   ggml_metal_buffer_get_tensor   (ggml_metal_buffer_t buf, const struct ggml_tensor * tensor, void * data, size_t offset, size_t size);
 void   ggml_metal_buffer_clear        (ggml_metal_buffer_t buf, uint8_t value);
+bool   ggml_metal_buffer_get_tensor_extra_q4_K(ggml_metal_buffer_t buf, const struct ggml_tensor * t, struct ggml_metal_tensor_extra_q4_K * extra);
 
 // finds the Metal buffer that contains the tensor data on the GPU device
 // the assumption is that there is 1-to-1 mapping between the host and device memory buffers, so we can find the
