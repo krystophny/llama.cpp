@@ -1,5 +1,9 @@
 #import "ggml-metal-device.h"
 
+#define GGML_COMMON_DECL_C
+#include "ggml-common.h"
+#undef GGML_COMMON_DECL_C
+#include "ggml-metal-impl.h"
 #import "ggml-impl.h"
 
 #include <Foundation/Foundation.h>
@@ -1279,6 +1283,15 @@ struct ggml_metal_buffer_wrapper {
     id<MTLBuffer> metal;
 };
 
+struct ggml_metal_tensor_extra_q4_K_ctx {
+    const struct ggml_tensor * tensor;
+    id<MTLBuffer> q;
+    id<MTLBuffer> s;
+    id<MTLBuffer> d;
+    id<MTLBuffer> dm;
+    struct ggml_metal_tensor_extra_q4_K_ctx * next;
+};
+
 struct ggml_metal_buffer {
     void * all_data;
     size_t all_size;
@@ -1296,6 +1309,8 @@ struct ggml_metal_buffer {
     // optional MTLResidencySet
     // note: cannot use explicitly "id<MTLResidencySet>" here because it is not available on certain OSes
     id rset;
+
+    struct ggml_metal_tensor_extra_q4_K_ctx * q4_k_aux;
 
     // pointers to global device
     ggml_metal_device_t dev;
@@ -1397,6 +1412,129 @@ static void * ggml_metal_host_malloc(size_t n) {
 #endif
 
     return data;
+}
+
+static struct ggml_metal_tensor_extra_q4_K_ctx * ggml_metal_buffer_get_q4_K_aux_ctx(ggml_metal_buffer_t buf, const struct ggml_tensor * tensor) {
+    struct ggml_metal_tensor_extra_q4_K_ctx * cur = buf->q4_k_aux;
+    while (cur != NULL) {
+        if (cur->tensor == tensor) {
+            return cur;
+        }
+        cur = cur->next;
+    }
+
+    return NULL;
+}
+
+static void ggml_metal_buffer_free_q4_K_aux_ctx(struct ggml_metal_tensor_extra_q4_K_ctx * ctx) {
+    if (ctx == NULL) {
+        return;
+    }
+
+    [ctx->q release];
+    [ctx->s release];
+    [ctx->d release];
+    [ctx->dm release];
+    free(ctx);
+}
+
+static void ggml_metal_buffer_clear_q4_K_aux(ggml_metal_buffer_t buf) {
+    struct ggml_metal_tensor_extra_q4_K_ctx * cur = buf->q4_k_aux;
+    while (cur != NULL) {
+        struct ggml_metal_tensor_extra_q4_K_ctx * next = cur->next;
+        ggml_metal_buffer_free_q4_K_aux_ctx(cur);
+        cur = next;
+    }
+    buf->q4_k_aux = NULL;
+}
+
+static inline void ggml_metal_unpack_scale_min_q4_K(int j, const uint8_t * q, uint8_t * d, uint8_t * m) {
+    if (j < 4) {
+        *d = q[j] & 63;
+        *m = q[j + 4] & 63;
+    } else {
+        *d = (q[j + 4] & 0xF) | ((q[j - 4] >> 6) << 4);
+        *m = (q[j + 4] >> 4) | ((q[j - 0] >> 6) << 4);
+    }
+}
+
+static void ggml_metal_buffer_set_tensor_q4_K_aux(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data) {
+    const size_t nb = tensor->ne[0] / QK_K;
+    const size_t nr0 = N_R0_Q4_K;
+    const size_t groups_per_plane = (tensor->ne[1] + nr0 - 1) / nr0;
+    const size_t planes = tensor->ne[2] * tensor->ne[3];
+    const size_t nblock_packed = planes * groups_per_plane * nb * nr0;
+    const size_t size_q = nblock_packed * (QK_K / 2);
+    const size_t size_s = nblock_packed * 16;
+    const size_t size_d = nblock_packed * sizeof(ggml_half);
+    const size_t size_dm = nblock_packed * sizeof(ggml_half);
+
+    struct ggml_metal_tensor_extra_q4_K_ctx * extra = ggml_metal_buffer_get_q4_K_aux_ctx(buf, tensor);
+    if (extra == NULL) {
+        extra = calloc(1, sizeof(*extra));
+        extra->tensor = tensor;
+        extra->next = buf->q4_k_aux;
+        buf->q4_k_aux = extra;
+    } else {
+        [extra->q release];
+        [extra->s release];
+        [extra->d release];
+        [extra->dm release];
+        extra->q = nil;
+        extra->s = nil;
+        extra->d = nil;
+        extra->dm = nil;
+    }
+
+    extra->q = [buf->dev->mtl_device newBufferWithLength:size_q options:MTLResourceStorageModeShared];
+    extra->s = [buf->dev->mtl_device newBufferWithLength:size_s options:MTLResourceStorageModeShared];
+    extra->d = [buf->dev->mtl_device newBufferWithLength:size_d options:MTLResourceStorageModeShared];
+    extra->dm = [buf->dev->mtl_device newBufferWithLength:size_dm options:MTLResourceStorageModeShared];
+
+    GGML_ASSERT(extra->q != nil && extra->s != nil && extra->d != nil && extra->dm != nil);
+
+    uint8_t * dst_q = (uint8_t *) [extra->q contents];
+    uint8_t * dst_s = (uint8_t *) [extra->s contents];
+    ggml_half * dst_d = (ggml_half *) [extra->d contents];
+    ggml_half * dst_dm = (ggml_half *) [extra->dm contents];
+
+    memset(dst_q, 0, size_q);
+    memset(dst_s, 0, size_s);
+    memset(dst_d, 0, size_d);
+    memset(dst_dm, 0, size_dm);
+
+    const char * src_base = (const char *) data;
+    for (int64_t i3 = 0; i3 < tensor->ne[3]; ++i3) {
+        for (int64_t i2 = 0; i2 < tensor->ne[2]; ++i2) {
+            const size_t plane = (size_t) i3 * (size_t) tensor->ne[2] + (size_t) i2;
+            const char * plane_base = src_base + i3 * tensor->nb[3] + i2 * tensor->nb[2];
+
+            for (size_t group = 0; group < groups_per_plane; ++group) {
+                for (size_t ib = 0; ib < nb; ++ib) {
+                    for (size_t row_slot = 0; row_slot < nr0; ++row_slot) {
+                        const size_t row = group * nr0 + row_slot;
+                        const size_t dst_index = (((plane * groups_per_plane + group) * nb + ib) * nr0) + row_slot;
+
+                        if (row >= (size_t) tensor->ne[1]) {
+                            continue;
+                        }
+
+                        const block_q4_K * src_block = (const block_q4_K *) (plane_base + row * tensor->nb[1]) + ib;
+
+                        memcpy(dst_q + dst_index * (QK_K / 2), src_block->qs, QK_K / 2);
+                        uint8_t * dst_sc = dst_s + dst_index * 16;
+                        for (int j = 0; j < 8; ++j) {
+                            ggml_metal_unpack_scale_min_q4_K(j, src_block->scales, &dst_sc[j], &dst_sc[8 + j]);
+                        }
+                        dst_d[dst_index] = src_block->d;
+                        dst_dm[dst_index] = src_block->dmin;
+                    }
+                }
+            }
+        }
+    }
+
+    tensor->extra = extra;
 }
 
 ggml_metal_buffer_t ggml_metal_buffer_init(ggml_metal_device_t dev, size_t size, bool shared) {
@@ -1572,6 +1710,7 @@ void ggml_metal_buffer_free(ggml_metal_buffer_t buf) {
     }
 
     ggml_metal_buffer_rset_free(buf);
+    ggml_metal_buffer_clear_q4_K_aux(buf);
 
     if (buf->is_shared && buf->owned) {
 #if TARGET_OS_OSX
@@ -1623,6 +1762,9 @@ void ggml_metal_buffer_memset_tensor(ggml_metal_buffer_t buf, struct ggml_tensor
 void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * tensor, const void * data, size_t offset, size_t size) {
     if (buf->is_shared) {
         memcpy((char *) tensor->data + offset, data, size);
+        if (tensor->type == GGML_TYPE_Q4_K && tensor->view_src == NULL && offset == 0 && size == ggml_nbytes(tensor)) {
+            ggml_metal_buffer_set_tensor_q4_K_aux(buf, tensor, data);
+        }
         return;
     }
 
@@ -1669,6 +1811,10 @@ void ggml_metal_buffer_set_tensor(ggml_metal_buffer_t buf, struct ggml_tensor * 
 
         dispatch_semaphore_wait(completion_semaphore, DISPATCH_TIME_FOREVER);
         dispatch_release(completion_semaphore);
+
+        if (tensor->type == GGML_TYPE_Q4_K && tensor->view_src == NULL && offset == 0 && size == ggml_nbytes(tensor)) {
+            ggml_metal_buffer_set_tensor_q4_K_aux(buf, tensor, data);
+        }
 
         //[cmd_buf waitUntilCompleted];
     }
@@ -1734,6 +1880,20 @@ void ggml_metal_buffer_clear(ggml_metal_buffer_t buf, uint8_t value) {
         [cmd_buf commit];
         [cmd_buf waitUntilCompleted];
     }
+}
+
+bool ggml_metal_buffer_get_tensor_extra_q4_K(ggml_metal_buffer_t buf, const struct ggml_tensor * t, struct ggml_metal_tensor_extra_q4_K * extra) {
+    struct ggml_metal_tensor_extra_q4_K_ctx * ctx = ggml_metal_buffer_get_q4_K_aux_ctx(buf, t);
+    if (ctx == NULL || ctx->q == nil || ctx->s == nil || ctx->d == nil || ctx->dm == nil) {
+        return false;
+    }
+
+    extra->q = (struct ggml_metal_buffer_id) { ctx->q, 0 };
+    extra->s = (struct ggml_metal_buffer_id) { ctx->s, 0 };
+    extra->d = (struct ggml_metal_buffer_id) { ctx->d, 0 };
+    extra->dm = (struct ggml_metal_buffer_id) { ctx->dm, 0 };
+
+    return true;
 }
 
 struct ggml_metal_buffer_id ggml_metal_buffer_get_id(ggml_metal_buffer_t buf, const struct ggml_tensor * t) {
