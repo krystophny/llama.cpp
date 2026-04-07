@@ -81,6 +81,18 @@ struct ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_base(ggml
     return res;
 }
 
+static int ggml_metal_q4_k_nsg_override(void) {
+    const char * value = getenv("GGML_METAL_Q4_K_NSG");
+    if (value == nullptr || value[0] == '\0') {
+        return 0;
+    }
+
+    const int nsg = atoi(value);
+    GGML_ASSERT(nsg >= 1 && nsg <= 4);
+
+    return nsg;
+}
+
 ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_cpy(ggml_metal_library_t lib, ggml_type tsrc, ggml_type tdst) {
     char base[256];
     char name[256];
@@ -780,7 +792,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv(ggml_meta
             } break;
         case GGML_TYPE_Q4_K:
             {
-                nsg = N_SG_Q4_K;
+                nsg = ggml_metal_q4_k_nsg_override();
+                if (nsg == 0) {
+                    nsg = N_SG_Q4_K;
+                }
                 nr0 = N_R0_Q4_K;
             } break;
         case GGML_TYPE_Q5_K:
@@ -992,7 +1007,10 @@ ggml_metal_pipeline_with_params ggml_metal_library_get_pipeline_mul_mv_id(ggml_m
             } break;
         case GGML_TYPE_Q4_K:
             {
-                nsg = N_SG_Q4_K;
+                nsg = ggml_metal_q4_k_nsg_override();
+                if (nsg == 0) {
+                    nsg = N_SG_Q4_K;
+                }
                 nr0 = N_R0_Q4_K;
             } break;
         case GGML_TYPE_Q5_K:
