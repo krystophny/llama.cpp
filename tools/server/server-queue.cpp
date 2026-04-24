@@ -3,6 +3,7 @@
 
 #include "log.h"
 
+#include <algorithm>
 #include <chrono>
 
 #define QUE_INF(fmt, ...) LOG_INF("que  %12.*s: " fmt, 12, __func__, __VA_ARGS__)
@@ -404,6 +405,51 @@ server_task_result_ptr server_response_reader::next(const std::function<bool()> 
     }
 
     // should not reach here
+}
+
+server_response_reader::next_kind server_response_reader::next_or_keepalive(
+        const std::function<bool()> & should_stop,
+        int keepalive_seconds,
+        server_task_result_ptr & out) {
+    if (keepalive_seconds <= 0) {
+        out = next(should_stop);
+        return out ? NEXT_RESULT : NEXT_STOPPED;
+    }
+    const int64_t deadline_ms = ggml_time_ms() + int64_t(keepalive_seconds) * 1000;
+    while (true) {
+        const int64_t now_ms = ggml_time_ms();
+        if (now_ms >= deadline_ms) {
+            return NEXT_KEEPALIVE;
+        }
+        const int64_t remaining_ms = deadline_ms - now_ms;
+        // recv_with_timeout granularity is seconds; clamp to polling_interval so should_stop stays responsive
+        int wait_s = std::max(1, static_cast<int>((remaining_ms + 999) / 1000));
+        wait_s = std::min(wait_s, polling_interval_seconds);
+        server_task_result_ptr result = queue_results.recv_with_timeout(id_tasks, wait_s);
+        if (result == nullptr) {
+            if (should_stop()) {
+                SRV_DBG("%s", "stopping wait for next result due to should_stop condition\n");
+                return NEXT_STOPPED;
+            }
+            continue;
+        }
+        if (result->is_error()) {
+            stop();
+            SRV_DBG("%s", "received error result, stopping further processing\n");
+            out = std::move(result);
+            return NEXT_RESULT;
+        }
+        if (!states.empty()) {
+            const size_t idx = result->index;
+            GGML_ASSERT(idx < states.size());
+            result->update(states[idx]);
+        }
+        if (result->is_stop()) {
+            received_count++;
+        }
+        out = std::move(result);
+        return NEXT_RESULT;
+    }
 }
 
 server_response_reader::batch_response server_response_reader::wait_for_all(const std::function<bool()> & should_stop) {

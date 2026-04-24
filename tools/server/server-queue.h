@@ -193,6 +193,20 @@ struct server_response_reader {
     // note: if one error is received, it will stop further processing and return error result
     server_task_result_ptr next(const std::function<bool()> & should_stop);
 
+    enum next_kind {
+        NEXT_STOPPED   = -1, // should_stop() became true before a result arrived
+        NEXT_KEEPALIVE =  0, // keepalive_seconds elapsed without a result; out not set
+        NEXT_RESULT    =  1, // out contains a result (possibly an error)
+    };
+
+    // Like next(), but also returns NEXT_KEEPALIVE after keepalive_seconds
+    // have elapsed without receiving a result. Caller can use this to emit
+    // SSE keep-alive bytes so long prefill does not look like a silent socket.
+    next_kind next_or_keepalive(
+        const std::function<bool()> & should_stop,
+        int keepalive_seconds,
+        server_task_result_ptr & out);
+
     struct batch_response {
         bool is_terminated = false; // if true, indicates that processing was stopped before all results were received
         std::vector<server_task_result_ptr> results;
