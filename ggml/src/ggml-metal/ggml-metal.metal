@@ -9559,7 +9559,7 @@ kernel void kernel_mul_mm(
     threadgroup S1 * sb = (threadgroup S1 *)(shmem + 4096);
 
     constexpr int NR0 = 64;
-    constexpr int NR1 = 32;
+    constexpr int NR1 = 64;
 
     constexpr int NK  = 32;
     constexpr int NL0 = NK/16;
@@ -9569,13 +9569,14 @@ kernel void kernel_mul_mm(
     const int r0 = tgpig.y*NR0;
     const int r1 = tgpig.x*NR1;
 
-    // if this block is of 64x32 shape or smaller
+    // if this block is of 64x64 shape or smaller
     const short nr0 = (args.ne0 - r0 < NR0) ? (args.ne0 - r0) : NR0;
     const short nr1 = (args.ne1 - r1 < NR1) ? (args.ne1 - r1) : NR1;
 
     // a thread shouldn't load data outside of the matrix
-    const short lr0 = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1; // 0 .. 63
-    const short lr1 = ((short)tiitg/NL1) < nr1 ? ((short)tiitg/NL1) : nr1 - 1; // 0 .. 31
+    const short lr0  = ((short)tiitg/NL0) < nr0 ? ((short)tiitg/NL0) : nr0 - 1; // 0 .. 63
+    const short lr1  = ((short)tiitg/NL1)      < nr1 ? ((short)tiitg/NL1)      : nr1 - 1; // 0 .. 31
+    const short lr1b = ((short)tiitg/NL1 + 32) < nr1 ? ((short)tiitg/NL1 + 32) : nr1 - 1; // 32 .. 63
 
     const short il0 = (tiitg % NL0);
 
@@ -9597,12 +9598,18 @@ kernel void kernel_mul_mm(
         + args.nb11*(r1 + lr1)
         + args.nb10*iy);
 
+    device const T1 * yb = (device const T1 *)(src1
+        + args.nb13*i13
+        + args.nb12*i12
+        + args.nb11*(r1 + lr1b)
+        + args.nb10*iy);
+
     S0_8x8 ma[4];
-    S1_8x8 mb[2];
+    S1_8x8 mb[4];
 
-    simdgroup_float8x8 mc[8];
+    simdgroup_float8x8 mc[16];
 
-    for (short i = 0; i < 8; i++){
+    for (short i = 0; i < 16; i++){
         mc[i] = make_filled_simdgroup_matrix<float, 8>(0.f);
     }
 
@@ -9659,9 +9666,11 @@ kernel void kernel_mul_mm(
               //const short lx = (tiitg/NL1)%8;
               //const short ly = i;
 
-                const short ib = 4*sx + sy;
+                const short ib  = 8*sx + sy;
+                const short ibb = 8*sx + sy + 4;
 
-                *(sb + 64*ib + 8*ly + lx) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) y + i) : 0;
+                *(sb + 64*ib  + 8*ly + lx) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) y  + i) : 0;
+                *(sb + 64*ibb + 8*ly + lx) = loop_k + iy + i < args.ne00 ? (S1) *((device T1 *) yb + i) : 0;
             }
         } else {
             const short sx = (tiitg%NL1);
@@ -9672,21 +9681,24 @@ kernel void kernel_mul_mm(
 
             const short ly = (tiitg/NL1)%8;
 
-            const short ib = 4*sx + sy;
+            const short ib  = 8*sx + sy;
+            const short ibb = 8*sx + sy + 4;
 
-            *(threadgroup S1_2x4 *)(sb + 64*ib + 8*ly) = (S1_2x4)(*((device T1_2x4 *) y));
+            *(threadgroup S1_2x4 *)(sb + 64*ib  + 8*ly) = (S1_2x4)(*((device T1_2x4 *) y));
+            *(threadgroup S1_2x4 *)(sb + 64*ibb + 8*ly) = (S1_2x4)(*((device T1_2x4 *) yb));
         }
 
         il = (il + 2 < nl) ? il + 2 : il % 2;
         x  = (il < 2) ? x + (2 + nl - 1)/nl : x;
 
-        y += NK;
+        y  += NK;
+        yb += NK;
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         // load matrices from threadgroup memory and conduct outer products
         threadgroup const S0 * lsma = (sa + 4*64*(sgitg%2));
-        threadgroup const S1 * lsmb = (sb + 2*64*(sgitg/2));
+        threadgroup const S1 * lsmb = (sb + 4*64*(sgitg/2));
 
         FOR_UNROLL (short ik = 0; ik < NK/8; ik++) {
             simdgroup_barrier(mem_flags::mem_none);
@@ -9697,18 +9709,18 @@ kernel void kernel_mul_mm(
 
             simdgroup_barrier(mem_flags::mem_none);
 
-            FOR_UNROLL (short i = 0; i < 2; i++) {
+            FOR_UNROLL (short i = 0; i < 4; i++) {
                 simdgroup_load(mb[i], lsmb + 64*i, 8, 0, false);
             }
 
             simdgroup_barrier(mem_flags::mem_none);
 
-            FOR_UNROLL (short i = 0; i < 8; i++){
+            FOR_UNROLL (short i = 0; i < 16; i++){
                 simdgroup_multiply_accumulate(mc[i], mb[i/4], ma[i%4], mc[i]);
             }
 
             lsma += 8*64;
-            lsmb += 4*64;
+            lsmb += 8*64;
         }
     }
 
@@ -9716,25 +9728,25 @@ kernel void kernel_mul_mm(
         // if no bounds checks on the output are needed, we can directly write to device memory
         device float * C = (device float *) dst +
             (r0 + 32*(sgitg &  1)) + \
-            (r1 + 16*(sgitg >> 1)) * args.ne0 + im*args.ne1*args.ne0;
+            (r1 + 32*(sgitg >> 1)) * args.ne0 + im*args.ne1*args.ne0;
 
-        for (short i = 0; i < 8; i++) {
+        for (short i = 0; i < 16; i++) {
             simdgroup_store(mc[i], C + 8*(i%4) + 8*args.ne0*(i/4), args.ne0, 0, false);
         }
     } else {
-        // block is smaller than 64x32, we should avoid writing data outside of the matrix
+        // block is smaller than 64x64, we should avoid writing data outside of the matrix
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
-        threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (16*(sgitg >> 1))*NR0;
+        threadgroup float * temp_str = ((threadgroup float *) shmem) + 32*(sgitg&1) + (32*(sgitg >> 1))*NR0;
 
-        for (short i = 0; i < 8; i++) {
+        for (short i = 0; i < 16; i++) {
             simdgroup_store(mc[i], temp_str + 8*(i%4) + 8*NR0*(i/4), NR0, 0, false);
         }
 
         threadgroup_barrier(mem_flags::mem_threadgroup);
 
         if (sgitg == 0) {
-            for (int j = tiitg; j < nr1; j += NR1) {
+            for (int j = tiitg; j < nr1; j += 32) {
                 device float  * D  = (device float  *) dst + r0 + (r1 + j)*args.ne0 + im*args.ne1*args.ne0;
                 device float4 * D4 = (device float4 *) D;
 
