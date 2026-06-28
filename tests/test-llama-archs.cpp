@@ -621,12 +621,9 @@ static int test_backends(const llm_arch target_arch, const size_t seed, const gg
                             model_and_ctx_roundtrip.first.get(), model_and_ctx_roundtrip.second.get(), tokens, encode);
                         status_roundtrip = "\033[1;32mOK\033[0m";
                         GGML_ASSERT(logits_roundtrip.size() == logits_dev.size());
-                        for (size_t i = 0; i < logits_roundtrip.size(); i++) {
-                            if (logits_roundtrip[i] != logits_dev[i]) {
-                                all_ok = false;
-                                status_roundtrip = "\033[1;31mFAIL\033[0m";
-                                break;
-                            }
+                        if (memcmp(logits_roundtrip.data(), logits_dev.data(), logits_dev.size() * sizeof(float)) != 0) {
+                            all_ok = false;
+                            status_roundtrip = "\033[1;31mFAIL\033[0m";
                         }
                     }
                 }
