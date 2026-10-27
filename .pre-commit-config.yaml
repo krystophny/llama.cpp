@@ -13,4 +13,6 @@ repos:
   rev: 7.0.0
   hooks:
   -   id: flake8
-      additional_dependencies: [flake8-no-print]
+      # flake8-no-print (vyahello) pins flake8==4.0.1 and makes the local
+      # hook env unresolvable; the no-print check still runs in CI (python-lint.yml)
+      additional_dependencies: []
