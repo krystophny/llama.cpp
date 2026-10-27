@@ -4161,36 +4161,55 @@ std::unique_ptr<server_res_generator> server_routes::handle_completions_impl(
         // in streaming mode, the first error must be treated as non-stream response
         // this is to match the OAI API behavior
         // ref: https://github.com/ggml-org/llama.cpp/pull/16486#discussion_r2419657309
-        auto first_result = rd.next(req.should_stop);
-        if (first_result == nullptr) {
+        //
+        // Once we start emitting SSE keep-alive bytes (during long prefill),
+        // we have committed to a 200/text-event-stream response and can no
+        // longer switch to a JSON error body. That is fine: a late error is
+        // surfaced as an SSE error event instead.
+        const int keepalive_s = params.stream_keepalive_seconds;
+
+        server_task_result_ptr first_result;
+        server_response_reader::next_kind first_kind =
+            rd.next_or_keepalive(req.should_stop, keepalive_s, first_result);
+
+        if (first_kind == server_response_reader::NEXT_STOPPED) {
             GGML_ASSERT(req.should_stop());
             return res; // connection is closed
         }
 
-        if (first_result->is_error()) {
+        const bool stream_committed = (first_kind == server_response_reader::NEXT_KEEPALIVE);
+
+        if (first_kind == server_response_reader::NEXT_RESULT && first_result->is_error()) {
             res->error(first_result->to_json());
             return res;
         }
 
-        GGML_ASSERT(
-            dynamic_cast<server_task_result_cmpl_partial*>(first_result.get()) != nullptr ||
-            dynamic_cast<server_task_result_cmpl_final*>  (first_result.get()) != nullptr
-        );
-
-        // next responses are streamed
-        // to be sent immediately
-        json first_result_json = first_result->to_json();
-        if (first_result_json == nullptr) {
-            res->data = ""; // simply send HTTP headers and status code
-        } else if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
-            res->data = format_anthropic_sse(first_result_json);
-        } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
-            res->data = format_oai_resp_sse(first_result_json);
-        } else {
-            res->data = format_oai_sse(first_result_json);
-        }
         res->status = 200;
         res->content_type = "text/event-stream";
+
+        if (stream_committed) {
+            // prefill is still running; prime the stream with a keep-alive
+            // comment so bytes flow before the first real chunk
+            res->data = ": keepalive\n\n";
+        } else {
+            GGML_ASSERT(
+                dynamic_cast<server_task_result_cmpl_partial*>(first_result.get()) != nullptr ||
+                dynamic_cast<server_task_result_cmpl_final*>  (first_result.get()) != nullptr
+            );
+            // next responses are streamed
+            // to be sent immediately
+            json first_result_json = first_result->to_json();
+            if (first_result_json == nullptr) {
+                res->data = ""; // simply send HTTP headers and status code
+            } else if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
+                res->data = format_anthropic_sse(first_result_json);
+            } else if (res_type == TASK_RESPONSE_TYPE_OAI_RESP) {
+                res->data = format_oai_resp_sse(first_result_json);
+            } else {
+                res->data = format_oai_sse(first_result_json);
+            }
+        }
+
         res->set_next([res_this = res.get(), res_type, sse_ping_interval](std::string & output) -> bool {
             static auto format_error = [](task_response_type res_type, const json & res_json) {
                 if (res_type == TASK_RESPONSE_TYPE_ANTHROPIC) {
